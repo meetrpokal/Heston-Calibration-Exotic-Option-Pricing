@@ -1,0 +1,9 @@
+build/
+outputs/
+*.exe
+*.obj
+*.o
+*.a
+*.dll
+*.lib
+*.pdb
