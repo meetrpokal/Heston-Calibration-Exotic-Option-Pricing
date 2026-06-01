@@ -37,7 +37,6 @@ endif()
 
 add_executable(main
 	src/main.cpp
-	src/heston_workflow.cpp
 )
 
 target_include_directories(main PRIVATE include ${QUANTLIB_INCLUDE_DIR} ${BOOST_INCLUDE_DIR})

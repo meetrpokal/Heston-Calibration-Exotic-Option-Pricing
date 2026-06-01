@@ -3,12 +3,32 @@
 #include <vector>
 #include <random>
 #include <cmath>
+#include <chrono>
+#include <ctime>
 
 using namespace QuantLib;
 
+Date currentQuantLibDate() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+
+#if defined(_WIN32)
+    localtime_s(&localTime, &nowTime);
+#else
+    localTime = *std::localtime(&nowTime);
+#endif
+
+    return Date(
+        localTime.tm_mday,
+        static_cast<Month>(localTime.tm_mon + 1),
+        localTime.tm_year + 1900
+    );
+}
+
 int main() {
     try {
-        Date today(28, May, 2026);
+        Date today = currentQuantLibDate();
         Settings::instance().evaluationDate() = today;
 
         Calendar cal = TARGET();

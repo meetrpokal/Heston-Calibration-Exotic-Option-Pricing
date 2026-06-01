@@ -10,6 +10,8 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <chrono>
+#include <ctime>
 #include <random>
 #include <cmath>
 #include <vector>
@@ -25,9 +27,81 @@ struct VolData {
     double volatility;
 };
 
+Date currentQuantLibDate() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+
+#if defined(_WIN32)
+    localtime_s(&localTime, &nowTime);
+#else
+    localTime = *std::localtime(&nowTime);
+#endif
+
+    return Date(
+        localTime.tm_mday,
+        static_cast<Month>(localTime.tm_mon + 1),
+        localTime.tm_year + 1900
+    );
+}
+
+Volatility impliedVolFromMarketPrice(
+    Real marketPrice,
+    Real spot,
+    Real strike,
+    const Date& valuationDate,
+    const Date& expiryDate,
+    Rate riskFreeRateValue,
+    Rate dividendYieldValue,
+    const Calendar& calendar,
+    Option::Type optionType = Option::Call) {
+
+    Handle<Quote> spotHandle(
+        ext::shared_ptr<Quote>(new SimpleQuote(spot))
+    );
+
+    Handle<YieldTermStructure> riskFreeRate(
+        ext::shared_ptr<YieldTermStructure>(
+            new FlatForward(valuationDate, riskFreeRateValue, Actual365Fixed())
+        )
+    );
+
+    Handle<YieldTermStructure> dividendYield(
+        ext::shared_ptr<YieldTermStructure>(
+            new FlatForward(valuationDate, dividendYieldValue, Actual365Fixed())
+        )
+    );
+
+    Handle<BlackVolTermStructure> volGuess(
+        ext::shared_ptr<BlackVolTermStructure>(
+            new BlackConstantVol(valuationDate, calendar, 0.20, Actual365Fixed())
+        )
+    );
+
+    ext::shared_ptr<BlackScholesMertonProcess> process(
+        new BlackScholesMertonProcess(
+            spotHandle,
+            dividendYield,
+            riskFreeRate,
+            volGuess
+        )
+    );
+
+    ext::shared_ptr<StrikedTypePayoff> payoff(
+        new PlainVanillaPayoff(optionType, strike)
+    );
+
+    ext::shared_ptr<Exercise> exercise(
+        new EuropeanExercise(expiryDate)
+    );
+
+    VanillaOption option(payoff, exercise);
+    return option.impliedVolatility(marketPrice, process, 1e-8, 500, 1e-4, 5.0);
+}
+
 int main(int argc, char* argv[]) {
 
-    Date todaysDate(26, May, 2026);
+    Date todaysDate = currentQuantLibDate();
     Settings::instance().evaluationDate() = todaysDate;
 
     Size numPaths = 100000;
@@ -54,6 +128,7 @@ int main(int argc, char* argv[]) {
         double implied_vol;
         double volume;
         double open_interest;
+        double underlying_price;
     };
 
     vector<OptionData> options;
@@ -78,67 +153,62 @@ int main(int argc, char* argv[]) {
     if (!file.is_open()) {
         cout << "Failed to open spy_options.csv. Tried: data/spy_options.csv and ../data/spy_options.csv" << endl;
         return 1;
-    } else {
-        string line;
-        getline(file, line);
-        DayCounter dc = Actual365Fixed();
-        while (getline(file, line)) {
-            stringstream ss(line);
-            string token;
-            OptionData od;
-            if (!getline(ss, token, ',')) continue;
-            int y = 0, m = 0, d = 0;
-            if (sscanf(token.c_str(), "%d-%d-%d", &y, &m, &d) == 3) {
-                od.expiry = Date(d, static_cast<Month>(m), y);
-            } else {
-                continue;
-            }
-            if (!getline(ss, token, ',')) continue; od.strike = stod(token);
-            if (!getline(ss, token, ',')) continue; od.market_price = stod(token);
-            if (!getline(ss, token, ',')) od.bid = 0.0; else od.bid = stod(token);
-            if (!getline(ss, token, ',')) od.ask = 0.0; else od.ask = stod(token);
-            if (!getline(ss, token, ',')) od.implied_vol = 0.0; else od.implied_vol = stod(token);
-            if (!getline(ss, token, ',')) od.volume = 0.0; else od.volume = stod(token);
-            if (!getline(ss, token, ',')) od.open_interest = 0.0; else od.open_interest = stod(token);
-
-            if (od.implied_vol > 1e-4) {
-                VolData v;
-                v.strike = od.strike;
-                double years = dc.yearFraction(todaysDate, od.expiry);
-                if (years <= 0) continue;
-                v.maturity = years;
-                v.volatility = od.implied_vol;
-                volSurface.push_back(v);
-            }
-
-            options.push_back(od);
-        }
-        file.close();
-
-        cout << "Loaded options from " << dataPath << ": " << options.size() << " rows; calibration vols: " << volSurface.size() << " rows" << endl;
     }
 
-    if (options.empty() || volSurface.empty()) {
+    string line;
+    getline(file, line);
+    while (getline(file, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        stringstream ss(line);
+        string token;
+        OptionData od;
+        od.underlying_price = 0.0;
+        if (!getline(ss, token, ',')) continue;
+        int y = 0, m = 0, d = 0;
+        if (sscanf(token.c_str(), "%d-%d-%d", &y, &m, &d) == 3) {
+            od.expiry = Date(d, static_cast<Month>(m), y);
+        } else {
+            continue;
+        }
+        if (!getline(ss, token, ',')) continue; od.strike = stod(token);
+        if (!getline(ss, token, ',')) continue; od.market_price = stod(token);
+        if (!getline(ss, token, ',')) od.bid = 0.0; else od.bid = stod(token);
+        if (!getline(ss, token, ',')) od.ask = 0.0; else od.ask = stod(token);
+        if (!getline(ss, token, ',')) od.implied_vol = 0.0; else od.implied_vol = stod(token);
+        if (!getline(ss, token, ',')) od.volume = 0.0; else od.volume = stod(token);
+        if (!getline(ss, token, ',')) od.open_interest = 0.0; else od.open_interest = stod(token);
+        if (getline(ss, token, ',')) {
+            od.underlying_price = stod(token);
+        }
+
+        options.push_back(od);
+    }
+    file.close();
+
+    cout << "Loaded options from " << dataPath << ": " << options.size() << " rows" << endl;
+
+    if (options.empty()) {
         cout << "No usable option rows were loaded from spy_options.csv; cannot calibrate or price." << endl;
         return 1;
     }
 
 
 
-    Real spotPrice = 4300.0;
-
-    if (!options.empty()) {
-        double bestScore = -1.0;
-        double estSpot = spotPrice;
-        for (const auto &o : options) {
-            double score = o.open_interest + o.volume;
-            if (score > bestScore) {
-                bestScore = score;
-                estSpot = o.strike;
-            }
+    Real spotPrice = 0.0;
+    for (const auto& o : options) {
+        if (o.underlying_price > 0.0) {
+            spotPrice = o.underlying_price;
+            break;
         }
-        spotPrice = estSpot;
-        cout << "Estimated spot from options: " << spotPrice << endl;
+    }
+
+    if (spotPrice <= 0.0) {
+        spotPrice = 750.0;
+        cout << "No underlying price metadata found in CSV; using fallback spot=" << spotPrice << endl;
+    } else {
+        cout << "Using underlying spot from CSV metadata: " << spotPrice << endl;
     }
 
     Rate riskFreeRateValue = 0.05;
@@ -147,7 +217,7 @@ int main(int argc, char* argv[]) {
     Volatility initialVol = 0.20;
 
     Calendar calendar = TARGET();
-
+    DayCounter dc = Actual365Fixed();
 
     Handle<Quote> spotHandle(
         ext::shared_ptr<Quote>(
@@ -174,6 +244,48 @@ int main(int argc, char* argv[]) {
             )
         )
     );
+
+    for (const auto& o : options) {
+        if (o.market_price <= 0.0) {
+            continue;
+        }
+
+        const double years = dc.yearFraction(todaysDate, o.expiry);
+        if (years <= 0.0) {
+            continue;
+        }
+
+        try {
+            const Volatility iv = impliedVolFromMarketPrice(
+                o.market_price,
+                spotPrice,
+                o.strike,
+                todaysDate,
+                o.expiry,
+                riskFreeRateValue,
+                dividendYieldValue,
+                calendar,
+                Option::Call
+            );
+
+            if (iv > 1e-4 && std::isfinite(iv)) {
+                VolData v;
+                v.strike = o.strike;
+                v.maturity = years;
+                v.volatility = iv;
+                volSurface.push_back(v);
+            }
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+
+    cout << "Constructed calibration surface with " << volSurface.size() << " rows from market prices" << endl;
+
+    if (volSurface.empty()) {
+        cout << "No usable implied vols could be computed from market prices; regenerate the dataset with download_option.py." << endl;
+        return 1;
+    }
 
 
     std::vector<Date> treasuryDates;
@@ -334,6 +446,8 @@ int main(int argc, char* argv[]) {
     cout << "rho    = " << hestonModel->rho() << endl;
 
     double errorSum = 0.0;
+    Size errorCount = 0;
+    Size fallbackCount = 0;
     map<double, pair<double, Size>> sliceStats;
 
     cout << "\nCalibration Errors:\n";
@@ -361,9 +475,14 @@ int main(int argc, char* argv[]) {
             usedFallback = true;
         }
 
-        errorSum += error * error;
-        sliceStats[volSurface[i].maturity].first += error * error;
-        sliceStats[volSurface[i].maturity].second += 1;
+        if (!usedFallback) {
+            errorSum += error * error;
+            sliceStats[volSurface[i].maturity].first += error * error;
+            sliceStats[volSurface[i].maturity].second += 1;
+            ++errorCount;
+        } else {
+            ++fallbackCount;
+        }
 
         cout << "Strike: " << volSurface[i].strike
              << "  Market Vol: " << marketVol
@@ -378,9 +497,12 @@ int main(int argc, char* argv[]) {
              << endl;
     }
 
-    double rmse = sqrt(errorSum / helperDetails.size());
+    double rmse = errorCount > 0 ? sqrt(errorSum / static_cast<double>(errorCount)) : std::numeric_limits<double>::quiet_NaN();
 
     cout << "\nRMSE = " << rmse << endl;
+    if (fallbackCount > 0) {
+        cout << "Skipped " << fallbackCount << " rows from RMSE because impliedVolatility() fell back to calibrationError()." << endl;
+    }
 
     cout << "\nRMSE by Maturity Slice:\n";
     for (const auto& entry : sliceStats) {
@@ -593,18 +715,57 @@ int main(int argc, char* argv[]) {
 
 
     double atmVol = 0.20;
-    double bestDiff = 1e99;
-    for (const auto &o : options) {
-        if (o.implied_vol > 1e-4) {
-            double d = std::fabs(o.strike - spotPrice);
-            if (d < bestDiff) {
-                bestDiff = d;
-                atmVol = o.implied_vol;
-            }
-        }
-    }
+    try {
+        ext::shared_ptr<StrikedTypePayoff> atmPayoff(
+            new PlainVanillaPayoff(Option::Call, spotPrice)
+        );
 
-    cout << "Using ATM vol for Black-Scholes: " << atmVol << endl;
+        ext::shared_ptr<Exercise> atmExercise(
+            new EuropeanExercise(maturityDate)
+        );
+
+        VanillaOption atmVanilla(atmPayoff, atmExercise);
+        atmVanilla.setPricingEngine(ext::shared_ptr<PricingEngine>(new AnalyticHestonEngine(hestonModel)));
+
+        Real atmPrice = atmVanilla.NPV();
+
+        Handle<BlackVolTermStructure> bsVolGuess(
+            ext::shared_ptr<BlackVolTermStructure>(
+                new BlackConstantVol(
+                    todaysDate,
+                    calendar,
+                    0.20,
+                    Actual365Fixed()
+                )
+            )
+        );
+
+        ext::shared_ptr<BlackScholesMertonProcess> bsGuessProcess(
+            new BlackScholesMertonProcess(
+                spotHandle,
+                dividendYield,
+                riskFreeRate,
+                bsVolGuess
+            )
+        );
+
+        atmVol = atmVanilla.impliedVolatility(
+            atmPrice,
+            bsGuessProcess,
+            1e-8,
+            500,
+            1e-4,
+            5.0
+        );
+
+        cout << "Using ATM vol implied from calibrated Heston: " << atmVol << endl;
+    } catch (const QuantLib::Error &e) {
+        cout << "QuantLib error while computing ATM vol from Heston: " << e.what() << endl;
+        cout << "Using fallback ATM vol: " << atmVol << endl;
+    } catch (const std::exception &e) {
+        cout << "STD exception while computing ATM vol from Heston: " << e.what() << endl;
+        cout << "Using fallback ATM vol: " << atmVol << endl;
+    }
 
     Handle<BlackVolTermStructure> blackVolTS(
         ext::shared_ptr<BlackVolTermStructure>(
@@ -758,7 +919,7 @@ int main(int argc, char* argv[]) {
             delta = (fdUp.second - fdDown.second) / (2.0 * h);
             cout << "\nDelta (FD): " << delta << endl;
         } else {
-            Size pathsForGreeks = std::max(static_cast<Size>(10000), numPaths / 10);
+            Size pathsForGreeks = std::max(static_cast<Size>(50000), numPaths / 2);
             Real pUpMc = priceByMcWithParams(spotPrice + h, 0.0, pathsForGreeks);
             Real pDownMc = priceByMcWithParams(spotPrice - h, 0.0, pathsForGreeks);
             delta = (pUpMc - pDownMc) / (2.0 * h);
@@ -782,7 +943,7 @@ int main(int argc, char* argv[]) {
             vega = (fvUp.second - fvDown.second) / (2.0 * volShift);
             cout << "Vega (FD): " << vega << endl;
         } else {
-            Size pathsForGreeks = std::max(static_cast<Size>(10000), numPaths / 10);
+            Size pathsForGreeks = std::max(static_cast<Size>(50000), numPaths / 2);
             Real pUpMc = priceByMcWithParams(spotPrice, volShift, pathsForGreeks);
             Real pDownMc = priceByMcWithParams(spotPrice, -volShift, pathsForGreeks);
             vega = (pUpMc - pDownMc) / (2.0 * volShift);
